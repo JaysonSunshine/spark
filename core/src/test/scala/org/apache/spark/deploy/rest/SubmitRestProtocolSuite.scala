@@ -18,17 +18,16 @@
 package org.apache.spark.deploy.rest
 
 import java.lang.Boolean
-import java.lang.Integer
 
 import org.json4s.jackson.JsonMethods._
-import org.scalatest.FunSuite
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SparkConf, SparkFunSuite}
+import org.apache.spark.util.Utils
 
 /**
  * Tests for the REST application submission protocol.
  */
-class SubmitRestProtocolSuite extends FunSuite {
+class SubmitRestProtocolSuite extends SparkFunSuite {
 
   test("validate") {
     val request = new DummyRequest
@@ -87,6 +86,8 @@ class SubmitRestProtocolSuite extends FunSuite {
     message.clientSparkVersion = "1.2.3"
     message.appResource = "honey-walnut-cherry.jar"
     message.mainClass = "org.apache.spark.examples.SparkPie"
+    message.appArgs = Array("two slices")
+    message.environmentVariables = Map("PATH" -> "/dev/null")
     val conf = new SparkConf(false)
     conf.set("spark.app.name", "SparkPie")
     message.sparkProperties = conf.getAll.toMap
@@ -94,7 +95,7 @@ class SubmitRestProtocolSuite extends FunSuite {
     // optional fields
     conf.set("spark.jars", "mayonnaise.jar,ketchup.jar")
     conf.set("spark.files", "fireball.png")
-    conf.set("spark.driver.memory", "512m")
+    conf.set("spark.driver.memory", s"${Utils.DEFAULT_DRIVER_MEM_MB}m")
     conf.set("spark.driver.cores", "180")
     conf.set("spark.driver.extraJavaOptions", " -Dslices=5 -Dcolor=mostly_red")
     conf.set("spark.driver.extraClassPath", "food-coloring.jar")
@@ -127,9 +128,10 @@ class SubmitRestProtocolSuite extends FunSuite {
     assert(newMessage.sparkProperties("spark.app.name") === "SparkPie")
     assert(newMessage.sparkProperties("spark.jars") === "mayonnaise.jar,ketchup.jar")
     assert(newMessage.sparkProperties("spark.files") === "fireball.png")
-    assert(newMessage.sparkProperties("spark.driver.memory") === "512m")
+    assert(newMessage.sparkProperties("spark.driver.memory") === s"${Utils.DEFAULT_DRIVER_MEM_MB}m")
     assert(newMessage.sparkProperties("spark.driver.cores") === "180")
-    assert(newMessage.sparkProperties("spark.driver.extraJavaOptions") === " -Dslices=5 -Dcolor=mostly_red")
+    assert(newMessage.sparkProperties("spark.driver.extraJavaOptions") ===
+      " -Dslices=5 -Dcolor=mostly_red")
     assert(newMessage.sparkProperties("spark.driver.extraClassPath") === "food-coloring.jar")
     assert(newMessage.sparkProperties("spark.driver.extraLibraryPath") === "pickle.jar")
     assert(newMessage.sparkProperties("spark.driver.supervise") === "false")
@@ -230,7 +232,7 @@ class SubmitRestProtocolSuite extends FunSuite {
     """.stripMargin
 
   private val submitDriverRequestJson =
-    """
+    s"""
       |{
       |  "action" : "CreateSubmissionRequest",
       |  "appArgs" : [ "two slices", "a hint of cinnamon" ],
@@ -246,7 +248,7 @@ class SubmitRestProtocolSuite extends FunSuite {
       |    "spark.driver.supervise" : "false",
       |    "spark.app.name" : "SparkPie",
       |    "spark.cores.max" : "10000",
-      |    "spark.driver.memory" : "512m",
+      |    "spark.driver.memory" : "${Utils.DEFAULT_DRIVER_MEM_MB}m",
       |    "spark.files" : "fireball.png",
       |    "spark.driver.cores" : "180",
       |    "spark.driver.extraJavaOptions" : " -Dslices=5 -Dcolor=mostly_red",

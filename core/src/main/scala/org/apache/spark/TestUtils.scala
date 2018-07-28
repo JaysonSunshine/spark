@@ -18,15 +18,27 @@
 package org.apache.spark
 
 import java.io.{ByteArrayInputStream, File, FileInputStream, FileOutputStream}
-import java.net.{URI, URL}
+import java.net.{HttpURLConnection, URI, URL}
+import java.nio.charset.StandardCharsets
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.util.{Arrays, Properties}
+import java.util.concurrent.{CountDownLatch, TimeoutException, TimeUnit}
 import java.util.jar.{JarEntry, JarOutputStream}
-
-import scala.collection.JavaConversions._
-
-import com.google.common.base.Charsets.UTF_8
-import com.google.common.io.{ByteStreams, Files}
+import javax.net.ssl._
 import javax.tools.{JavaFileObject, SimpleJavaFileObject, ToolProvider}
 
+import scala.collection.JavaConverters._
+import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
+import scala.sys.process.{Process, ProcessLogger}
+import scala.util.Try
+
+import com.google.common.io.{ByteStreams, Files}
+import org.apache.log4j.PropertyConfigurator
+
+import org.apache.spark.executor.TaskMetrics
+import org.apache.spark.scheduler._
 import org.apache.spark.util.Utils
 
 /**
@@ -47,11 +59,11 @@ private[spark] object TestUtils {
   def createJarWithClasses(
       classNames: Seq[String],
       toStringValue: String = "",
-      classNamesWithBase: Seq[(String, String)] = Seq(),
-      classpathUrls: Seq[URL] = Seq()): URL = {
+      classNamesWithBase: Seq[(String, String)] = Seq.empty,
+      classpathUrls: Seq[URL] = Seq.empty): URL = {
     val tempDir = Utils.createTempDir()
     val files1 = for (name <- classNames) yield {
-      createCompiledClass(name, tempDir, toStringValue, classpathUrls = classpathUrls) 
+      createCompiledClass(name, tempDir, toStringValue, classpathUrls = classpathUrls)
     }
     val files2 = for ((childName, baseName) <- classNamesWithBase) yield {
       createCompiledClass(childName, tempDir, toStringValue, baseName, classpathUrls)
@@ -71,22 +83,25 @@ private[spark] object TestUtils {
     files.foreach { case (k, v) =>
       val entry = new JarEntry(k)
       jarStream.putNextEntry(entry)
-      ByteStreams.copy(new ByteArrayInputStream(v.getBytes(UTF_8)), jarStream)
+      ByteStreams.copy(new ByteArrayInputStream(v.getBytes(StandardCharsets.UTF_8)), jarStream)
     }
     jarStream.close()
     jarFile.toURI.toURL
   }
 
   /**
-   * Create a jar file that contains this set of files. All files will be located at the root
-   * of the jar.
+   * Create a jar file that contains this set of files. All files will be located in the specified
+   * directory or at the root of the jar.
    */
-  def createJar(files: Seq[File], jarFile: File): URL = {
+  def createJar(files: Seq[File], jarFile: File, directoryPrefix: Option[String] = None): URL = {
     val jarFileStream = new FileOutputStream(jarFile)
     val jarStream = new JarOutputStream(jarFileStream, new java.util.jar.Manifest())
 
     for (file <- files) {
-      val jarEntry = new JarEntry(file.getName)
+      // The `name` for the argument in `JarEntry` should use / for its separator. This is
+      // ZIP specification.
+      val prefix = directoryPrefix.map(d => s"$d/").getOrElse("")
+      val jarEntry = new JarEntry(prefix + file.getName)
       jarStream.putNextEntry(jarEntry)
 
       val in = new FileInputStream(file)
@@ -105,32 +120,27 @@ private[spark] object TestUtils {
     URI.create(s"string:///${name.replace(".", "/")}${SOURCE.extension}")
   }
 
-  private class JavaSourceFromString(val name: String, val code: String)
+  private[spark] class JavaSourceFromString(val name: String, val code: String)
     extends SimpleJavaFileObject(createURI(name), SOURCE) {
-    override def getCharContent(ignoreEncodingErrors: Boolean) = code
+    override def getCharContent(ignoreEncodingErrors: Boolean): String = code
   }
 
-  /** Creates a compiled class with the given name. Class file will be placed in destDir. */
+  /** Creates a compiled class with the source file. Class file will be placed in destDir. */
   def createCompiledClass(
       className: String,
       destDir: File,
-      toStringValue: String = "",
-      baseClass: String = null,
-      classpathUrls: Seq[URL] = Seq()): File = {
+      sourceFile: JavaSourceFromString,
+      classpathUrls: Seq[URL]): File = {
     val compiler = ToolProvider.getSystemJavaCompiler
-    val extendsText = Option(baseClass).map { c => s" extends ${c}" }.getOrElse("")
-    val sourceFile = new JavaSourceFromString(className,
-      "public class " + className + extendsText + " implements java.io.Serializable {" +
-      "  @Override public String toString() { return \"" + toStringValue + "\"; }}")
 
-    // Calling this outputs a class file in pwd. It's easier to just rename the file than
+    // Calling this outputs a class file in pwd. It's easier to just rename the files than
     // build a custom FileManager that controls the output location.
     val options = if (classpathUrls.nonEmpty) {
       Seq("-classpath", classpathUrls.map { _.getFile }.mkString(File.pathSeparator))
     } else {
-      Seq()
+      Seq.empty
     }
-    compiler.getTask(null, null, null, options, null, Seq(sourceFile)).call()
+    compiler.getTask(null, null, null, options.asJava, null, Arrays.asList(sourceFile)).call()
 
     val fileName = className + ".class"
     val result = new File(fileName)
@@ -143,5 +153,166 @@ private[spark] object TestUtils {
 
     assert(out.exists(), "Destination file not moved: " + out.getAbsolutePath())
     out
+  }
+
+  /** Creates a compiled class with the given name. Class file will be placed in destDir. */
+  def createCompiledClass(
+      className: String,
+      destDir: File,
+      toStringValue: String = "",
+      baseClass: String = null,
+      classpathUrls: Seq[URL] = Seq.empty): File = {
+    val extendsText = Option(baseClass).map { c => s" extends ${c}" }.getOrElse("")
+    val sourceFile = new JavaSourceFromString(className,
+      "public class " + className + extendsText + " implements java.io.Serializable {" +
+      "  @Override public String toString() { return \"" + toStringValue + "\"; }}")
+    createCompiledClass(className, destDir, sourceFile, classpathUrls)
+  }
+
+  /**
+   * Run some code involving jobs submitted to the given context and assert that the jobs spilled.
+   */
+  def assertSpilled[T](sc: SparkContext, identifier: String)(body: => T): Unit = {
+    val spillListener = new SpillListener
+    sc.addSparkListener(spillListener)
+    body
+    assert(spillListener.numSpilledStages > 0, s"expected $identifier to spill, but did not")
+  }
+
+  /**
+   * Run some code involving jobs submitted to the given context and assert that the jobs
+   * did not spill.
+   */
+  def assertNotSpilled[T](sc: SparkContext, identifier: String)(body: => T): Unit = {
+    val spillListener = new SpillListener
+    sc.addSparkListener(spillListener)
+    body
+    assert(spillListener.numSpilledStages == 0, s"expected $identifier to not spill, but did")
+  }
+
+  /**
+   * Test if a command is available.
+   */
+  def testCommandAvailable(command: String): Boolean = {
+    val attempt = Try(Process(command).run(ProcessLogger(_ => ())).exitValue())
+    attempt.isSuccess && attempt.get == 0
+  }
+
+  /**
+   * Returns the response code from an HTTP(S) URL.
+   */
+  def httpResponseCode(
+      url: URL,
+      method: String = "GET",
+      headers: Seq[(String, String)] = Nil): Int = {
+    val connection = url.openConnection().asInstanceOf[HttpURLConnection]
+    connection.setRequestMethod(method)
+    headers.foreach { case (k, v) => connection.setRequestProperty(k, v) }
+
+    // Disable cert and host name validation for HTTPS tests.
+    if (connection.isInstanceOf[HttpsURLConnection]) {
+      val sslCtx = SSLContext.getInstance("SSL")
+      val trustManager = new X509TrustManager {
+        override def getAcceptedIssuers(): Array[X509Certificate] = null
+        override def checkClientTrusted(x509Certificates: Array[X509Certificate], s: String) {}
+        override def checkServerTrusted(x509Certificates: Array[X509Certificate], s: String) {}
+      }
+      val verifier = new HostnameVerifier() {
+        override def verify(hostname: String, session: SSLSession): Boolean = true
+      }
+      sslCtx.init(null, Array(trustManager), new SecureRandom())
+      connection.asInstanceOf[HttpsURLConnection].setSSLSocketFactory(sslCtx.getSocketFactory())
+      connection.asInstanceOf[HttpsURLConnection].setHostnameVerifier(verifier)
+    }
+
+    try {
+      connection.connect()
+      connection.getResponseCode()
+    } finally {
+      connection.disconnect()
+    }
+  }
+
+  /**
+   * Wait until at least `numExecutors` executors are up, or throw `TimeoutException` if the waiting
+   * time elapsed before `numExecutors` executors up. Exposed for testing.
+   *
+   * @param numExecutors the number of executors to wait at least
+   * @param timeout time to wait in milliseconds
+   */
+  private[spark] def waitUntilExecutorsUp(
+      sc: SparkContext,
+      numExecutors: Int,
+      timeout: Long): Unit = {
+    val finishTime = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout)
+    while (System.nanoTime() < finishTime) {
+      if (sc.statusTracker.getExecutorInfos.length > numExecutors) {
+        return
+      }
+      // Sleep rather than using wait/notify, because this is used only for testing and wait/notify
+      // add overhead in the general case.
+      Thread.sleep(10)
+    }
+    throw new TimeoutException(
+      s"Can't find $numExecutors executors before $timeout milliseconds elapsed")
+  }
+
+  /**
+   * config a log4j properties used for testsuite
+   */
+  def configTestLog4j(level: String): Unit = {
+    val pro = new Properties()
+    pro.put("log4j.rootLogger", s"$level, console")
+    pro.put("log4j.appender.console", "org.apache.log4j.ConsoleAppender")
+    pro.put("log4j.appender.console.target", "System.err")
+    pro.put("log4j.appender.console.layout", "org.apache.log4j.PatternLayout")
+    pro.put("log4j.appender.console.layout.ConversionPattern",
+      "%d{yy/MM/dd HH:mm:ss} %p %c{1}: %m%n")
+    PropertyConfigurator.configure(pro)
+  }
+
+  /**
+   * Lists files recursively.
+   */
+  def recursiveList(f: File): Array[File] = {
+    require(f.isDirectory)
+    val current = f.listFiles
+    current ++ current.filter(_.isDirectory).flatMap(recursiveList)
+  }
+
+}
+
+
+/**
+ * A `SparkListener` that detects whether spills have occurred in Spark jobs.
+ */
+private class SpillListener extends SparkListener {
+  private val stageIdToTaskMetrics = new mutable.HashMap[Int, ArrayBuffer[TaskMetrics]]
+  private val spilledStageIds = new mutable.HashSet[Int]
+  private val stagesDone = new CountDownLatch(1)
+
+  def numSpilledStages: Int = {
+    // Long timeout, just in case somehow the job end isn't notified.
+    // Fails if a timeout occurs
+    assert(stagesDone.await(10, TimeUnit.SECONDS))
+    spilledStageIds.size
+  }
+
+  override def onTaskEnd(taskEnd: SparkListenerTaskEnd): Unit = {
+    stageIdToTaskMetrics.getOrElseUpdate(
+      taskEnd.stageId, new ArrayBuffer[TaskMetrics]) += taskEnd.taskMetrics
+  }
+
+  override def onStageCompleted(stageComplete: SparkListenerStageCompleted): Unit = {
+    val stageId = stageComplete.stageInfo.stageId
+    val metrics = stageIdToTaskMetrics.remove(stageId).toSeq.flatten
+    val spilled = metrics.map(_.memoryBytesSpilled).sum > 0
+    if (spilled) {
+      spilledStageIds += stageId
+    }
+  }
+
+  override def onJobEnd(jobEnd: SparkListenerJobEnd): Unit = {
+    stagesDone.countDown()
   }
 }

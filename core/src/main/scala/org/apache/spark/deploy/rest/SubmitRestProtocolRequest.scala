@@ -24,7 +24,7 @@ import org.apache.spark.util.Utils
 /**
  * An abstract request sent from the client in the REST application submission protocol.
  */
-private[spark] abstract class SubmitRestProtocolRequest extends SubmitRestProtocolMessage {
+private[rest] abstract class SubmitRestProtocolRequest extends SubmitRestProtocolMessage {
   var clientSparkVersion: String = null
   protected override def doValidate(): Unit = {
     super.doValidate()
@@ -35,7 +35,7 @@ private[spark] abstract class SubmitRestProtocolRequest extends SubmitRestProtoc
 /**
  * A request to launch a new application in the REST application submission protocol.
  */
-private[spark] class CreateSubmissionRequest extends SubmitRestProtocolRequest {
+private[rest] class CreateSubmissionRequest extends SubmitRestProtocolRequest {
   var appResource: String = null
   var mainClass: String = null
   var appArgs: Array[String] = null
@@ -46,6 +46,8 @@ private[spark] class CreateSubmissionRequest extends SubmitRestProtocolRequest {
     super.doValidate()
     assert(sparkProperties != null, "No Spark properties set!")
     assertFieldIsSet(appResource, "appResource")
+    assertFieldIsSet(appArgs, "appArgs")
+    assertFieldIsSet(environmentVariables, "environmentVariables")
     assertPropertyIsSet("spark.app.name")
     assertPropertyIsBoolean("spark.driver.supervise")
     assertPropertyIsNumeric("spark.driver.cores")
@@ -61,7 +63,7 @@ private[spark] class CreateSubmissionRequest extends SubmitRestProtocolRequest {
     assertProperty[Boolean](key, "boolean", _.toBoolean)
 
   private def assertPropertyIsNumeric(key: String): Unit =
-    assertProperty[Int](key, "numeric", _.toInt)
+    assertProperty[Double](key, "numeric", _.toDouble)
 
   private def assertPropertyIsMemory(key: String): Unit =
     assertProperty[Int](key, "memory", Utils.memoryStringToMb)

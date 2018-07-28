@@ -38,8 +38,21 @@ package object analysis {
 
   implicit class AnalysisErrorAt(t: TreeNode[_]) {
     /** Fails the analysis at the point where a specific tree node was parsed. */
-    def failAnalysis(msg: String) = {
+    def failAnalysis(msg: String): Nothing = {
       throw new AnalysisException(msg, t.origin.line, t.origin.startPosition)
+    }
+
+    /** Fails the analysis at the point where a specific tree node was parsed. */
+    def failAnalysis(msg: String, cause: Throwable): Nothing = {
+      throw new AnalysisException(msg, t.origin.line, t.origin.startPosition, cause = Some(cause))
+    }
+  }
+
+  /** Catches any AnalysisExceptions thrown by `f` and attaches `t`'s position if any. */
+  def withPosition[A](t: TreeNode[_])(f: => A): A = {
+    try f catch {
+      case a: AnalysisException =>
+        throw a.withPosition(t.origin.line, t.origin.startPosition)
     }
   }
 }

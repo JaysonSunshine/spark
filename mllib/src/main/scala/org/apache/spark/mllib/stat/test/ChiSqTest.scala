@@ -17,15 +17,16 @@
 
 package org.apache.spark.mllib.stat.test
 
+import scala.collection.mutable
+
 import breeze.linalg.{DenseMatrix => BDM}
 import org.apache.commons.math3.distribution.ChiSquaredDistribution
 
-import org.apache.spark.{SparkException, Logging}
+import org.apache.spark.SparkException
+import org.apache.spark.internal.Logging
 import org.apache.spark.mllib.linalg.{Matrices, Matrix, Vector, Vectors}
 import org.apache.spark.mllib.regression.LabeledPoint
 import org.apache.spark.rdd.RDD
-
-import scala.collection.mutable
 
 /**
  * Conduct the chi-squared test for the input RDDs using the specified method.
@@ -40,7 +41,7 @@ import scala.collection.mutable
  *
  * More information on Chi-squared test: http://en.wikipedia.org/wiki/Chi-squared_test
  */
-private[stat] object ChiSqTest extends Logging {
+private[spark] object ChiSqTest extends Logging {
 
   /**
    * @param name String name for the method.
@@ -70,6 +71,11 @@ private[stat] object ChiSqTest extends Logging {
   }
 
   /**
+   * Max number of categories when indexing labels and features
+   */
+  private[spark] val maxCategories: Int = 10000
+
+  /**
    * Conduct Pearson's independence test for each feature against the label across the input RDD.
    * The contingency table is constructed from the raw (feature, label) pairs and used to conduct
    * the independence test.
@@ -77,7 +83,6 @@ private[stat] object ChiSqTest extends Logging {
    */
   def chiSquaredFeatures(data: RDD[LabeledPoint],
       methodName: String = PEARSON.name): Array[ChiSqTestResult] = {
-    val maxCategories = 10000
     val numCols = data.first().features.size
     val results = new Array[ChiSqTestResult](numCols)
     var labels: Map[Double, Int] = null
@@ -109,7 +114,9 @@ private[stat] object ChiSqTest extends Logging {
           }
           i += 1
           distinctLabels += label
-          features.toArray.view.zipWithIndex.slice(startCol, endCol).map { case (feature, col) =>
+          val brzFeatures = features.asBreeze
+          (startCol until endCol).map { col =>
+            val feature = brzFeatures(col)
             allDistinctFeatures(col) += feature
             (col, feature, label)
           }
@@ -122,7 +129,7 @@ private[stat] object ChiSqTest extends Logging {
           pairCounts.keys.filter(_._1 == startCol).map(_._3).toArray.distinct.zipWithIndex.toMap
       }
       val numLabels = labels.size
-      pairCounts.keys.groupBy(_._1).map { case (col, keys) =>
+      pairCounts.keys.groupBy(_._1).foreach { case (col, keys) =>
         val features = keys.map(_._2).toArray.distinct.zipWithIndex.toMap
         val numRows = features.size
         val contingency = new BDM(numRows, numLabels, new Array[Double](numRows * numLabels))
@@ -143,7 +150,7 @@ private[stat] object ChiSqTest extends Logging {
    * Uniform distribution is assumed when `expected` is not passed in.
    */
   def chiSquared(observed: Vector,
-      expected: Vector = Vectors.dense(Array[Double]()),
+      expected: Vector = Vectors.dense(Array.empty[Double]),
       methodName: String = PEARSON.name): ChiSqTestResult = {
 
     // Validate input arguments
@@ -196,7 +203,7 @@ private[stat] object ChiSqTest extends Logging {
    * Pearson's independence test on the input contingency matrix.
    * TODO: optimize for SparseMatrix when it becomes supported.
    */
-  def chiSquaredMatrix(counts: Matrix, methodName:String = PEARSON.name): ChiSqTestResult = {
+  def chiSquaredMatrix(counts: Matrix, methodName: String = PEARSON.name): ChiSqTestResult = {
     val method = methodFromString(methodName)
     val numRows = counts.numRows
     val numCols = counts.numCols
@@ -205,8 +212,10 @@ private[stat] object ChiSqTest extends Logging {
     val colSums = new Array[Double](numCols)
     val rowSums = new Array[Double](numRows)
     val colMajorArr = counts.toArray
+    val colMajorArrLen = colMajorArr.length
+
     var i = 0
-    while (i < colMajorArr.size) {
+    while (i < colMajorArrLen) {
       val elem = colMajorArr(i)
       if (elem < 0.0) {
         throw new IllegalArgumentException("Contingency table cannot contain negative entries.")
@@ -220,7 +229,7 @@ private[stat] object ChiSqTest extends Logging {
     // second pass to collect statistic
     var statistic = 0.0
     var j = 0
-    while (j < colMajorArr.size) {
+    while (j < colMajorArrLen) {
       val col = j / numRows
       val colSum = colSums(col)
       if (colSum == 0.0) {

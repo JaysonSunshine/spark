@@ -17,15 +17,58 @@
 
 package org.apache.spark.deploy.worker
 
-import org.apache.spark.SparkConf
-import org.apache.spark.deploy.Command
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.function.Supplier
 
-import org.scalatest.{Matchers, FunSuite}
+import org.mockito.{Mock, MockitoAnnotations}
+import org.mockito.Answers.RETURNS_SMART_NULLS
+import org.mockito.Matchers._
+import org.mockito.Mockito._
+import org.mockito.invocation.InvocationOnMock
+import org.mockito.stubbing.Answer
+import org.scalatest.{BeforeAndAfter, Matchers}
 
-class WorkerSuite extends FunSuite with Matchers {
+import org.apache.spark.{SecurityManager, SparkConf, SparkFunSuite}
+import org.apache.spark.deploy.{Command, ExecutorState, ExternalShuffleService}
+import org.apache.spark.deploy.DeployMessages.{DriverStateChanged, ExecutorStateChanged}
+import org.apache.spark.deploy.master.DriverState
+import org.apache.spark.rpc.{RpcAddress, RpcEnv}
 
-  def cmd(javaOpts: String*) = Command("", Seq.empty, Map.empty, Seq.empty, Seq.empty, Seq(javaOpts:_*))
-  def conf(opts: (String, String)*) = new SparkConf(loadDefaults = false).setAll(opts)
+class WorkerSuite extends SparkFunSuite with Matchers with BeforeAndAfter {
+
+  import org.apache.spark.deploy.DeployTestUtils._
+
+  @Mock(answer = RETURNS_SMART_NULLS) private var shuffleService: ExternalShuffleService = _
+
+  def cmd(javaOpts: String*): Command = {
+    Command("", Seq.empty, Map.empty, Seq.empty, Seq.empty, Seq(javaOpts : _*))
+  }
+  def conf(opts: (String, String)*): SparkConf = new SparkConf(loadDefaults = false).setAll(opts)
+
+  private var _worker: Worker = _
+
+  private def makeWorker(
+      conf: SparkConf,
+      shuffleServiceSupplier: Supplier[ExternalShuffleService] = null): Worker = {
+    assert(_worker === null, "Some Worker's RpcEnv is leaked in tests")
+    val securityMgr = new SecurityManager(conf)
+    val rpcEnv = RpcEnv.create("test", "localhost", 12345, conf, securityMgr)
+    _worker = new Worker(rpcEnv, 50000, 20, 1234 * 5, Array.fill(1)(RpcAddress("1.2.3.4", 1234)),
+      "Worker", "/tmp", conf, securityMgr, shuffleServiceSupplier)
+    _worker
+  }
+
+  before {
+    MockitoAnnotations.initMocks(this)
+  }
+
+  after {
+    if (_worker != null) {
+      _worker.rpcEnv.shutdown()
+      _worker.rpcEnv.awaitTermination()
+      _worker = null
+    }
+  }
 
   test("test isUseLocalNodeSSLConfig") {
     Worker.isUseLocalNodeSSLConfig(cmd("-Dasdf=dfgh")) shouldBe false
@@ -53,5 +96,151 @@ class WorkerSuite extends FunSuite with Matchers {
         .javaOpts should contain theSameElementsAs Seq(
           "-Dspark.ssl.useNodeLocalConf=true", "-Dspark.ssl.opt1=y", "-Dspark.ssl.opt2=z")
 
+  }
+
+  test("test clearing of finishedExecutors (small number of executors)") {
+    val conf = new SparkConf()
+    conf.set("spark.worker.ui.retainedExecutors", 2.toString)
+    val worker = makeWorker(conf)
+    // initialize workers
+    for (i <- 0 until 5) {
+      worker.executors += s"app1/$i" -> createExecutorRunner(i)
+    }
+    // initialize ExecutorStateChanged Message
+    worker.handleExecutorStateChanged(
+      ExecutorStateChanged("app1", 0, ExecutorState.EXITED, None, None))
+    assert(worker.finishedExecutors.size === 1)
+    assert(worker.executors.size === 4)
+    for (i <- 1 until 5) {
+      worker.handleExecutorStateChanged(
+        ExecutorStateChanged("app1", i, ExecutorState.EXITED, None, None))
+      assert(worker.finishedExecutors.size === 2)
+      if (i > 1) {
+        assert(!worker.finishedExecutors.contains(s"app1/${i - 2}"))
+      }
+      assert(worker.executors.size === 4 - i)
+    }
+  }
+
+  test("test clearing of finishedExecutors (more executors)") {
+    val conf = new SparkConf()
+    conf.set("spark.worker.ui.retainedExecutors", 30.toString)
+    val worker = makeWorker(conf)
+    // initialize workers
+    for (i <- 0 until 50) {
+      worker.executors += s"app1/$i" -> createExecutorRunner(i)
+    }
+    // initialize ExecutorStateChanged Message
+    worker.handleExecutorStateChanged(
+      ExecutorStateChanged("app1", 0, ExecutorState.EXITED, None, None))
+    assert(worker.finishedExecutors.size === 1)
+    assert(worker.executors.size === 49)
+    for (i <- 1 until 50) {
+      val expectedValue = {
+        if (worker.finishedExecutors.size < 30) {
+          worker.finishedExecutors.size + 1
+        } else {
+          28
+        }
+      }
+      worker.handleExecutorStateChanged(
+        ExecutorStateChanged("app1", i, ExecutorState.EXITED, None, None))
+      if (expectedValue == 28) {
+        for (j <- i - 30 until i - 27) {
+          assert(!worker.finishedExecutors.contains(s"app1/$j"))
+        }
+      }
+      assert(worker.executors.size === 49 - i)
+      assert(worker.finishedExecutors.size === expectedValue)
+    }
+  }
+
+  test("test clearing of finishedDrivers (small number of drivers)") {
+    val conf = new SparkConf()
+    conf.set("spark.worker.ui.retainedDrivers", 2.toString)
+    val worker = makeWorker(conf)
+    // initialize workers
+    for (i <- 0 until 5) {
+      val driverId = s"driverId-$i"
+      worker.drivers += driverId -> createDriverRunner(driverId)
+    }
+    // initialize DriverStateChanged Message
+    worker.handleDriverStateChanged(DriverStateChanged("driverId-0", DriverState.FINISHED, None))
+    assert(worker.drivers.size === 4)
+    assert(worker.finishedDrivers.size === 1)
+    for (i <- 1 until 5) {
+      val driverId = s"driverId-$i"
+      worker.handleDriverStateChanged(DriverStateChanged(driverId, DriverState.FINISHED, None))
+      if (i > 1) {
+        assert(!worker.finishedDrivers.contains(s"driverId-${i - 2}"))
+      }
+      assert(worker.drivers.size === 4 - i)
+      assert(worker.finishedDrivers.size === 2)
+    }
+  }
+
+  test("test clearing of finishedDrivers (more drivers)") {
+    val conf = new SparkConf()
+    conf.set("spark.worker.ui.retainedDrivers", 30.toString)
+    val worker = makeWorker(conf)
+    // initialize workers
+    for (i <- 0 until 50) {
+      val driverId = s"driverId-$i"
+      worker.drivers += driverId -> createDriverRunner(driverId)
+    }
+    // initialize DriverStateChanged Message
+    worker.handleDriverStateChanged(DriverStateChanged("driverId-0", DriverState.FINISHED, None))
+    assert(worker.finishedDrivers.size === 1)
+    assert(worker.drivers.size === 49)
+    for (i <- 1 until 50) {
+      val expectedValue = {
+        if (worker.finishedDrivers.size < 30) {
+          worker.finishedDrivers.size + 1
+        } else {
+          28
+        }
+      }
+      val driverId = s"driverId-$i"
+      worker.handleDriverStateChanged(DriverStateChanged(driverId, DriverState.FINISHED, None))
+      if (expectedValue == 28) {
+        for (j <- i - 30 until i - 27) {
+          assert(!worker.finishedDrivers.contains(s"driverId-$j"))
+        }
+      }
+      assert(worker.drivers.size === 49 - i)
+      assert(worker.finishedDrivers.size === expectedValue)
+    }
+  }
+
+  test("cleanup non-shuffle files after executor exits when config " +
+      "spark.storage.cleanupFilesAfterExecutorExit=true") {
+    testCleanupFilesWithConfig(true)
+  }
+
+  test("don't cleanup non-shuffle files after executor exits when config " +
+      "spark.storage.cleanupFilesAfterExecutorExit=false") {
+    testCleanupFilesWithConfig(false)
+  }
+
+  private def testCleanupFilesWithConfig(value: Boolean) = {
+    val conf = new SparkConf().set("spark.storage.cleanupFilesAfterExecutorExit", value.toString)
+
+    val cleanupCalled = new AtomicBoolean(false)
+    when(shuffleService.executorRemoved(any[String], any[String])).thenAnswer(new Answer[Unit] {
+      override def answer(invocations: InvocationOnMock): Unit = {
+        cleanupCalled.set(true)
+      }
+    })
+    val externalShuffleServiceSupplier = new Supplier[ExternalShuffleService] {
+      override def get: ExternalShuffleService = shuffleService
+    }
+    val worker = makeWorker(conf, externalShuffleServiceSupplier)
+    // initialize workers
+    for (i <- 0 until 10) {
+      worker.executors += s"app1/$i" -> createExecutorRunner(i)
+    }
+    worker.handleExecutorStateChanged(
+      ExecutorStateChanged("app1", 0, ExecutorState.EXITED, None, None))
+    assert(cleanupCalled.get() == value)
   }
 }

@@ -17,12 +17,11 @@
 
 package org.apache.spark.mllib.evaluation
 
-import org.scalatest.FunSuite
-
+import org.apache.spark.SparkFunSuite
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.rdd.RDD
 
-class MultilabelMetricsSuite extends FunSuite with MLlibTestSparkContext {
+class MultilabelMetricsSuite extends SparkFunSuite with MLlibTestSparkContext {
   test("Multilabel evaluation metrics") {
     /*
     * Documents true labels (5x class0, 3x class1, 4x class2):
@@ -48,7 +47,7 @@ class MultilabelMetricsSuite extends FunSuite with MLlibTestSparkContext {
     val scoreAndLabels: RDD[(Array[Double], Array[Double])] = sc.parallelize(
       Seq((Array(0.0, 1.0), Array(0.0, 2.0)),
         (Array(0.0, 2.0), Array(0.0, 1.0)),
-        (Array(), Array(0.0)),
+        (Array.empty[Double], Array(0.0)),
         (Array(2.0), Array(2.0)),
         (Array(2.0, 0.0), Array(2.0, 0.0)),
         (Array(0.0, 1.0, 2.0), Array(0.0, 1.0)),

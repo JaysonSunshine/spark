@@ -17,12 +17,12 @@
 
 package org.apache.spark.util.collection
 
-import org.scalatest.FunSuite
 import org.scalatest.Matchers
 
+import org.apache.spark.SparkFunSuite
 import org.apache.spark.util.SizeEstimator
 
-class OpenHashSetSuite extends FunSuite with Matchers {
+class OpenHashSetSuite extends SparkFunSuite with Matchers {
 
   test("size for specialized, primitive int") {
     val loadFactor = 0.7
@@ -175,5 +175,10 @@ class OpenHashSetSuite extends FunSuite with Matchers {
     }
     assert(set.size === 1000)
     assert(set.capacity > 1000)
+  }
+
+  test("SPARK-18200 Support zero as an initial set size") {
+    val set = new OpenHashSet[Long](0)
+    assert(set.size === 0)
   }
 }

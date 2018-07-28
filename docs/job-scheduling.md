@@ -14,8 +14,7 @@ runs an independent set of executor processes. The cluster managers that Spark r
 facilities for [scheduling across applications](#scheduling-across-applications). Second,
 _within_ each Spark application, multiple "jobs" (Spark actions) may be running concurrently
 if they were submitted by different threads. This is common if your application is serving requests
-over the network; for example, the [Shark](http://shark.cs.berkeley.edu) server works this way. Spark
-includes a [fair scheduler](#scheduling-within-an-application) to schedule resources within each SparkContext.
+over the network. Spark includes a [fair scheduler](#scheduling-within-an-application) to schedule resources within each SparkContext.
 
 # Scheduling Across Applications
 
@@ -24,7 +23,7 @@ run tasks and store data for that application. If multiple users need to share y
 different options to manage allocation, depending on the cluster manager.
 
 The simplest option, available on all cluster managers, is _static partitioning_ of resources. With
-this approach, each application is given a maximum amount of resources it can use, and holds onto them
+this approach, each application is given a maximum amount of resources it can use and holds onto them
 for its whole duration. This is the approach used in Spark's [standalone](spark-standalone.html)
 and [YARN](running-on-yarn.html) modes, as well as the
 [coarse-grained Mesos mode](running-on-mesos.html#mesos-run-modes).
@@ -33,14 +32,17 @@ Resource allocation can be configured as follows, based on the cluster type:
 * **Standalone mode:** By default, applications submitted to the standalone mode cluster will run in
   FIFO (first-in-first-out) order, and each application will try to use all available nodes. You can limit
   the number of nodes an application uses by setting the `spark.cores.max` configuration property in it,
-  or change the default for applications that don't set this setting through `spark.deploy.defaultCores`. 
+  or change the default for applications that don't set this setting through `spark.deploy.defaultCores`.
   Finally, in addition to controlling cores, each application's `spark.executor.memory` setting controls
   its memory use.
 * **Mesos:** To use static partitioning on Mesos, set the `spark.mesos.coarse` configuration property to `true`,
   and optionally set `spark.cores.max` to limit each application's resource share as in the standalone mode.
   You should also set `spark.executor.memory` to control the executor memory.
 * **YARN:** The `--num-executors` option to the Spark YARN client controls how many executors it will allocate
-  on the cluster, while `--executor-memory` and `--executor-cores` control the resources per executor.
+  on the cluster (`spark.executor.instances` as configuration property), while `--executor-memory`
+  (`spark.executor.memory` configuration property) and `--executor-cores` (`spark.executor.cores` configuration
+  property) control the resources per executor. For more information, see the
+  [YARN Spark Properties](running-on-yarn.html).
 
 A second option available on Mesos is _dynamic sharing_ of CPU cores. In this mode, each Spark application
 still has a fixed and independent memory allocation (set by `spark.executor.memory`), but when the
@@ -48,58 +50,44 @@ application is not running tasks on a machine, other applications may run tasks 
 is useful when you expect large numbers of not overly active applications, such as shell sessions from
 separate users. However, it comes with a risk of less predictable latency, because it may take a while for
 an application to gain back cores on one node when it has work to do. To use this mode, simply use a
-`mesos://` URL without setting `spark.mesos.coarse` to true.
+`mesos://` URL and set `spark.mesos.coarse` to false.
 
 Note that none of the modes currently provide memory sharing across applications. If you would like to share
 data this way, we recommend running a single server application that can serve multiple requests by querying
-the same RDDs. For example, the [Shark](http://shark.cs.berkeley.edu) JDBC server works this way for SQL
-queries. In future releases, in-memory storage systems such as [Tachyon](http://tachyon-project.org) will
-provide another approach to share RDDs.
+the same RDDs.
 
 ## Dynamic Resource Allocation
 
-Spark 1.2 introduces the ability to dynamically scale the set of cluster resources allocated to
-your application up and down based on the workload. This means that your application may give
-resources back to the cluster if they are no longer used and request them again later when there
-is demand. This feature is particularly useful if multiple applications share resources in your
-Spark cluster. If a subset of the resources allocated to an application becomes idle, it can be
-returned to the cluster's pool of resources and acquired by other applications. In Spark, dynamic
-resource allocation is performed on the granularity of the executor and can be enabled through
-`spark.dynamicAllocation.enabled`.
+Spark provides a mechanism to dynamically adjust the resources your application occupies based
+on the workload. This means that your application may give resources back to the cluster if they
+are no longer used and request them again later when there is demand. This feature is particularly
+useful if multiple applications share resources in your Spark cluster.
 
-This feature is currently disabled by default and available only on [YARN](running-on-yarn.html).
-A future release will extend this to [standalone mode](spark-standalone.html) and
-[Mesos coarse-grained mode](running-on-mesos.html#mesos-run-modes). Note that although Spark on
-Mesos already has a similar notion of dynamic resource sharing in fine-grained mode, enabling
-dynamic allocation allows your Mesos application to take advantage of coarse-grained low-latency
-scheduling while sharing cluster resources efficiently.
+This feature is disabled by default and available on all coarse-grained cluster managers, i.e.
+[standalone mode](spark-standalone.html), [YARN mode](running-on-yarn.html), and
+[Mesos coarse-grained mode](running-on-mesos.html#mesos-run-modes).
 
 ### Configuration and Setup
 
-All configurations used by this feature live under the `spark.dynamicAllocation.*` namespace.
-To enable this feature, your application must set `spark.dynamicAllocation.enabled` to `true`.
-Other relevant configurations are described on the
-[configurations page](configuration.html#dynamic-allocation) and in the subsequent sections in
-detail.
+There are two requirements for using this feature. First, your application must set
+`spark.dynamicAllocation.enabled` to `true`. Second, you must set up an *external shuffle service*
+on each worker node in the same cluster and set `spark.shuffle.service.enabled` to true in your
+application. The purpose of the external shuffle service is to allow executors to be removed
+without deleting shuffle files written by them (more detail described
+[below](job-scheduling.html#graceful-decommission-of-executors)). The way to set up this service
+varies across cluster managers:
 
-Additionally, your application must use an external shuffle service. The purpose of the service is
-to preserve the shuffle files written by executors so the executors can be safely removed (more
-detail described [below](job-scheduling.html#graceful-decommission-of-executors)). To enable
-this service, set `spark.shuffle.service.enabled` to `true`. In YARN, this external shuffle service
-is implemented in `org.apache.spark.yarn.network.YarnShuffleService` that runs in each `NodeManager`
-in your cluster. To start this service, follow these steps:
+In standalone mode, simply start your workers with `spark.shuffle.service.enabled` set to `true`.
 
-1. Build Spark with the [YARN profile](building-spark.html). Skip this step if you are using a
-pre-packaged distribution.
-2. Locate the `spark-<version>-yarn-shuffle.jar`. This should be under
-`$SPARK_HOME/network/yarn/target/scala-<version>` if you are building Spark yourself, and under
-`lib` if you are using a distribution.
-2. Add this jar to the classpath of all `NodeManager`s in your cluster.
-3. In the `yarn-site.xml` on each node, add `spark_shuffle` to `yarn.nodemanager.aux-services`,
-then set `yarn.nodemanager.aux-services.spark_shuffle.class` to
-`org.apache.spark.network.yarn.YarnShuffleService`. Additionally, set all relevant
-`spark.shuffle.service.*` [configurations](configuration.html).
-4. Restart all `NodeManager`s in your cluster.
+In Mesos coarse-grained mode, run `$SPARK_HOME/sbin/start-mesos-shuffle-service.sh` on all
+slave nodes with `spark.shuffle.service.enabled` set to `true`. For instance, you may do so
+through Marathon.
+
+In YARN mode, follow the instructions [here](running-on-yarn.html#configuring-the-external-shuffle-service).
+
+All other relevant configurations are optional and under the `spark.dynamicAllocation.*` and
+`spark.shuffle.service.*` namespaces. For more detail, see the
+[configurations page](configuration.html#dynamic-allocation).
 
 ### Resource Allocation Policy
 
@@ -159,8 +147,9 @@ executors will fetch shuffle files from the service instead of from each other. 
 shuffle state written by an executor may continue to be served beyond the executor's lifetime.
 
 In addition to writing shuffle files, executors also cache data either on disk or in memory.
-When an executor is removed, however, all cached data will no longer be accessible. There is
-currently not yet a solution for this in Spark 1.2. In future releases, the cached data may be
+When an executor is removed, however, all cached data will no longer be accessible.  To mitigate this,
+by default executors containing cached data are never removed.  You can configure this behavior with
+`spark.dynamicAllocation.cachedExecutorIdleTimeout`.  In future releases, the cached data may be
 preserved through an off-heap storage similar in spirit to how shuffle files are preserved through
 the external shuffle service.
 
@@ -241,12 +230,12 @@ properties:
 * `minShare`: Apart from an overall weight, each pool can be given a _minimum shares_ (as a number of
   CPU cores) that the administrator would like it to have. The fair scheduler always attempts to meet
   all active pools' minimum shares before redistributing extra resources according to the weights.
-  The `minShare` property can therefore be another way to ensure that a pool can always get up to a
+  The `minShare` property can, therefore, be another way to ensure that a pool can always get up to a
   certain number of resources (e.g. 10 cores) quickly without giving it a high priority for the rest
   of the cluster. By default, each pool's `minShare` is 0.
 
 The pool properties can be set by creating an XML file, similar to `conf/fairscheduler.xml.template`,
-and setting a `spark.scheduler.allocation.file` property in your
+and either putting a file named `fairscheduler.xml` on the classpath, or setting `spark.scheduler.allocation.file` property in your
 [SparkConf](configuration.html#spark-properties).
 
 {% highlight scala %}
@@ -275,3 +264,11 @@ within it for the various settings. For example:
 A full example is also available in `conf/fairscheduler.xml.template`. Note that any pools not
 configured in the XML file will simply get default values for all settings (scheduling mode FIFO,
 weight 1, and minShare 0).
+
+## Scheduling using JDBC Connections
+To set a [Fair Scheduler](job-scheduling.html#fair-scheduler-pools) pool for a JDBC client session,
+users can set the `spark.sql.thriftserver.scheduler.pool` variable:
+
+{% highlight SQL %}
+SET spark.sql.thriftserver.scheduler.pool=accounting;
+{% endhighlight %}

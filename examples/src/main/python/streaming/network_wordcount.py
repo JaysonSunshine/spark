@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-"""
+r"""
  Counts words in UTF8 encoded, '\n' delimited text received from the network every second.
  Usage: network_wordcount.py <hostname> <port>
    <hostname> and <port> describe the TCP server that Spark Streaming would connect to receive data.
@@ -25,6 +25,7 @@
  and then run the example
     `$ bin/spark-submit examples/src/main/python/streaming/network_wordcount.py localhost 9999`
 """
+from __future__ import print_function
 
 import sys
 
@@ -33,8 +34,8 @@ from pyspark.streaming import StreamingContext
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print >> sys.stderr, "Usage: network_wordcount.py <hostname> <port>"
-        exit(-1)
+        print("Usage: network_wordcount.py <hostname> <port>", file=sys.stderr)
+        sys.exit(-1)
     sc = SparkContext(appName="PythonStreamingNetworkWordCount")
     ssc = StreamingContext(sc, 1)
 

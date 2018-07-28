@@ -21,16 +21,37 @@ import scala.reflect.ClassTag
 
 import org.apache.spark.{Partition, TaskContext}
 
+/**
+ * An RDD that applies the provided function to every partition of the parent RDD.
+ *
+ * @param prev the parent RDD.
+ * @param f The function used to map a tuple of (TaskContext, partition index, input iterator) to
+ *          an output iterator.
+ * @param preservesPartitioning Whether the input function preserves the partitioner, which should
+ *                              be `false` unless `prev` is a pair RDD and the input function
+ *                              doesn't modify the keys.
+ * @param isFromBarrier Indicates whether this RDD is transformed from an RDDBarrier, a stage
+ *                      containing at least one RDDBarrier shall be turned into a barrier stage.
+ */
 private[spark] class MapPartitionsRDD[U: ClassTag, T: ClassTag](
-    prev: RDD[T],
+    var prev: RDD[T],
     f: (TaskContext, Int, Iterator[T]) => Iterator[U],  // (TaskContext, partition index, iterator)
-    preservesPartitioning: Boolean = false)
+    preservesPartitioning: Boolean = false,
+    isFromBarrier: Boolean = false)
   extends RDD[U](prev) {
 
   override val partitioner = if (preservesPartitioning) firstParent[T].partitioner else None
 
   override def getPartitions: Array[Partition] = firstParent[T].partitions
 
-  override def compute(split: Partition, context: TaskContext) =
+  override def compute(split: Partition, context: TaskContext): Iterator[U] =
     f(context, split.index, firstParent[T].iterator(split, context))
+
+  override def clearDependencies() {
+    super.clearDependencies()
+    prev = null
+  }
+
+  @transient protected lazy override val isBarrier_ : Boolean =
+    isFromBarrier || dependencies.exists(_.rdd.isBarrier())
 }

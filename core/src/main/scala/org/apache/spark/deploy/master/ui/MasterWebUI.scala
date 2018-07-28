@@ -17,21 +17,23 @@
 
 package org.apache.spark.deploy.master.ui
 
-import org.apache.spark.Logging
+import org.apache.spark.deploy.DeployMessages.{MasterStateResponse, RequestMasterState}
 import org.apache.spark.deploy.master.Master
+import org.apache.spark.internal.Logging
 import org.apache.spark.ui.{SparkUI, WebUI}
 import org.apache.spark.ui.JettyUtils._
-import org.apache.spark.util.AkkaUtils
 
 /**
  * Web UI server for the standalone master.
  */
-private[spark]
-class MasterWebUI(val master: Master, requestedPort: Int)
-  extends WebUI(master.securityMgr, requestedPort, master.conf, name = "MasterUI") with Logging {
+private[master]
+class MasterWebUI(
+    val master: Master,
+    requestedPort: Int)
+  extends WebUI(master.securityMgr, master.securityMgr.getSSLOptions("standalone"),
+    requestedPort, master.conf, name = "MasterUI") with Logging {
 
-  val masterActorRef = master.self
-  val timeout = AkkaUtils.askTimeout(master.conf)
+  val masterEndpointRef = master.self
   val killEnabled = master.conf.getBoolean("spark.ui.killEnabled", true)
 
   initialize()
@@ -40,28 +42,29 @@ class MasterWebUI(val master: Master, requestedPort: Int)
   def initialize() {
     val masterPage = new MasterPage(this)
     attachPage(new ApplicationPage(this))
-    attachPage(new HistoryNotFoundPage(this))
     attachPage(masterPage)
-    attachHandler(createStaticHandler(MasterWebUI.STATIC_RESOURCE_DIR, "/static"))
-    attachHandler(
-      createRedirectHandler("/app/kill", "/", masterPage.handleAppKillRequest))
-    attachHandler(
-      createRedirectHandler("/driver/kill", "/", masterPage.handleDriverKillRequest))
+    addStaticHandler(MasterWebUI.STATIC_RESOURCE_DIR)
+    attachHandler(createRedirectHandler(
+      "/app/kill", "/", masterPage.handleAppKillRequest, httpMethods = Set("POST")))
+    attachHandler(createRedirectHandler(
+      "/driver/kill", "/", masterPage.handleDriverKillRequest, httpMethods = Set("POST")))
   }
 
-  /** Attach a reconstructed UI to this Master UI. Only valid after bind(). */
-  def attachSparkUI(ui: SparkUI) {
-    assert(serverInfo.isDefined, "Master UI must be bound to a server before attaching SparkUIs")
-    ui.getHandlers.foreach(attachHandler)
+  def addProxy(): Unit = {
+    val handler = createProxyHandler(idToUiAddress)
+    attachHandler(handler)
   }
 
-  /** Detach a reconstructed UI from this Master UI. Only valid after bind(). */
-  def detachSparkUI(ui: SparkUI) {
-    assert(serverInfo.isDefined, "Master UI must be bound to a server before detaching SparkUIs")
-    ui.getHandlers.foreach(detachHandler)
+  def idToUiAddress(id: String): Option[String] = {
+    val state = masterEndpointRef.askSync[MasterStateResponse](RequestMasterState)
+    val maybeWorkerUiAddress = state.workers.find(_.id == id).map(_.webUiAddress)
+    val maybeAppUiAddress = state.activeApps.find(_.id == id).map(_.desc.appUiUrl)
+
+    maybeWorkerUiAddress.orElse(maybeAppUiAddress)
   }
+
 }
 
-private[spark] object MasterWebUI {
-  val STATIC_RESOURCE_DIR = SparkUI.STATIC_RESOURCE_DIR
+private[master] object MasterWebUI {
+  private val STATIC_RESOURCE_DIR = SparkUI.STATIC_RESOURCE_DIR
 }

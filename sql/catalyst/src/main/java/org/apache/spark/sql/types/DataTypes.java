@@ -19,10 +19,15 @@ package org.apache.spark.sql.types;
 
 import java.util.*;
 
+import org.apache.spark.annotation.InterfaceStability;
+
 /**
  * To get/create specific data type, users should use singleton objects and factory methods
  * provided by this class.
+ *
+ * @since 1.3.0
  */
+@InterfaceStability.Stable
 public class DataTypes {
   /**
    * Gets the StringType object.
@@ -48,6 +53,11 @@ public class DataTypes {
    * Gets the TimestampType object.
    */
   public static final DataType TimestampType = TimestampType$.MODULE$;
+
+  /**
+   * Gets the CalendarIntervalType object.
+   */
+  public static final DataType CalendarIntervalType = CalendarIntervalType$.MODULE$;
 
   /**
    * Gets the DoubleType object.
@@ -106,12 +116,18 @@ public class DataTypes {
     return new ArrayType(elementType, containsNull);
   }
 
+  /**
+   * Creates a DecimalType by specifying the precision and scale.
+   */
   public static DecimalType createDecimalType(int precision, int scale) {
     return DecimalType$.MODULE$.apply(precision, scale);
   }
 
+  /**
+   * Creates a DecimalType with default precision and scale, which are 10 and 0.
+   */
   public static DecimalType createDecimalType() {
-    return DecimalType$.MODULE$.Unlimited();
+    return DecimalType$.MODULE$.USER_DEFAULT();
   }
 
   /**
@@ -180,7 +196,7 @@ public class DataTypes {
    * Creates a StructType with the given list of StructFields ({@code fields}).
    */
   public static StructType createStructType(List<StructField> fields) {
-    return createStructType(fields.toArray(new StructField[0]));
+    return createStructType(fields.toArray(new StructField[fields.size()]));
   }
 
   /**
@@ -190,7 +206,7 @@ public class DataTypes {
     if (fields == null) {
       throw new IllegalArgumentException("fields should not be null.");
     }
-    Set<String> distinctNames = new HashSet<String>();
+    Set<String> distinctNames = new HashSet<>();
     for (StructField field : fields) {
       if (field == null) {
         throw new IllegalArgumentException(

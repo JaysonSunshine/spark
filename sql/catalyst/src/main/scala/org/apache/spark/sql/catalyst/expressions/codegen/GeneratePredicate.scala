@@ -17,32 +17,68 @@
 
 package org.apache.spark.sql.catalyst.expressions.codegen
 
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 
 /**
- * Generates bytecode that evaluates a boolean [[Expression]] on a given input [[Row]].
+ * Interface for generated predicate
  */
-object GeneratePredicate extends CodeGenerator[Expression, (Row) => Boolean] {
-  import scala.reflect.runtime.{universe => ru}
-  import scala.reflect.runtime.universe._
+abstract class Predicate {
+  def eval(r: InternalRow): Boolean
 
-  protected def canonicalize(in: Expression): Expression = ExpressionCanonicalizer(in)
+  /**
+   * Initializes internal states given the current partition index.
+   * This is used by nondeterministic expressions to set initial states.
+   * The default implementation does nothing.
+   */
+  def initialize(partitionIndex: Int): Unit = {}
+}
+
+/**
+ * Generates bytecode that evaluates a boolean [[Expression]] on a given input [[InternalRow]].
+ */
+object GeneratePredicate extends CodeGenerator[Expression, Predicate] {
+
+  protected def canonicalize(in: Expression): Expression = ExpressionCanonicalizer.execute(in)
 
   protected def bind(in: Expression, inputSchema: Seq[Attribute]): Expression =
     BindReferences.bindReference(in, inputSchema)
 
-  protected def create(predicate: Expression): ((Row) => Boolean) = {
-    val cEval = expressionEvaluator(predicate)
+  protected def create(predicate: Expression): Predicate = {
+    val ctx = newCodeGenContext()
+    val eval = predicate.genCode(ctx)
 
-    val code =
-      q"""
-        (i: $rowType) => {
-          ..${cEval.code}
-          if (${cEval.nullTerm}) false else ${cEval.primitiveTerm}
+    val codeBody = s"""
+      public SpecificPredicate generate(Object[] references) {
+        return new SpecificPredicate(references);
+      }
+
+      class SpecificPredicate extends ${classOf[Predicate].getName} {
+        private final Object[] references;
+        ${ctx.declareMutableStates()}
+
+        public SpecificPredicate(Object[] references) {
+          this.references = references;
+          ${ctx.initMutableStates()}
         }
-      """
 
-    log.debug(s"Generated predicate '$predicate':\n$code")
-    toolBox.eval(code).asInstanceOf[Row => Boolean]
+        public void initialize(int partitionIndex) {
+          ${ctx.initPartition()}
+        }
+
+        public boolean eval(InternalRow ${ctx.INPUT_ROW}) {
+          ${eval.code}
+          return !${eval.isNull} && ${eval.value};
+        }
+
+        ${ctx.declareAddedFunctions()}
+      }"""
+
+    val code = CodeFormatter.stripOverlappingComments(
+      new CodeAndComment(codeBody, ctx.getPlaceHolderToComments()))
+    logDebug(s"Generated predicate '$predicate':\n${CodeFormatter.format(code)}")
+
+    val (clazz, _) = CodeGenerator.compile(code)
+    clazz.generate(ctx.references.toArray).asInstanceOf[Predicate]
   }
 }

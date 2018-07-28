@@ -17,11 +17,9 @@
 
 package org.apache.spark.deploy.master
 
-private[spark] object ApplicationState extends Enumeration {
+private[master] object ApplicationState extends Enumeration {
 
   type ApplicationState = Value
 
   val WAITING, RUNNING, FINISHED, FAILED, KILLED, UNKNOWN = Value
-
-  val MAX_NUM_RETRY = 10
 }

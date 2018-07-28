@@ -15,10 +15,6 @@
 # limitations under the License.
 #
 
-import sys
-
-from pyspark import SparkContext
-
 """
 Read data file users.parquet in local Spark distro:
 
@@ -33,29 +29,41 @@ $ ./bin/spark-submit --driver-class-path /path/to/example/jar \\
 {u'favorite_color': u'red', u'name': u'Ben', u'favorite_numbers': []}
 <...more log output...>
 """
+from __future__ import print_function
+
+import sys
+
+from pyspark.sql import SparkSession
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print >> sys.stderr, """
+        print("""
         Usage: parquet_inputformat.py <data_file>
 
         Run with example jar:
         ./bin/spark-submit --driver-class-path /path/to/example/jar \\
                 /path/to/examples/parquet_inputformat.py <data_file>
         Assumes you have Parquet data stored in <data_file>.
-        """
-        exit(-1)
+        """, file=sys.stderr)
+        sys.exit(-1)
 
     path = sys.argv[1]
-    sc = SparkContext(appName="ParquetInputFormat")
+
+    spark = SparkSession\
+        .builder\
+        .appName("ParquetInputFormat")\
+        .getOrCreate()
+
+    sc = spark.sparkContext
 
     parquet_rdd = sc.newAPIHadoopFile(
         path,
-        'parquet.avro.AvroParquetInputFormat',
+        'org.apache.parquet.avro.AvroParquetInputFormat',
         'java.lang.Void',
         'org.apache.avro.generic.IndexedRecord',
         valueConverter='org.apache.spark.examples.pythonconverters.IndexedRecordToJavaConverter')
     output = parquet_rdd.map(lambda x: x[1]).collect()
     for k in output:
-        print k
+        print(k)
 
-    sc.stop()
+    spark.stop()

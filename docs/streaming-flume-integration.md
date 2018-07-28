@@ -5,6 +5,8 @@ title: Spark Streaming + Flume Integration Guide
 
 [Apache Flume](https://flume.apache.org/) is a distributed, reliable, and available service for efficiently collecting, aggregating, and moving large amounts of log data. Here we explain how to configure Flume and Spark Streaming to receive data from Flume. There are two approaches to this.
 
+**Note: Flume support is deprecated as of Spark 2.3.0.**
+
 ## Approach 1: Flume-style Push-based Approach
 Flume is designed to push data between Flume agents. In this approach, Spark Streaming essentially sets up a receiver that acts an Avro agent for Flume, to which Flume can push the data. Here are the configuration steps.
 
@@ -15,7 +17,7 @@ Choose a machine in your cluster such that
 
 - Flume can be configured to push data to a port on that machine.
 
-Due to the push model, the streaming application needs to be up, with the receiver scheduled and listening on the chosen port, for Flume to be able push data.
+Due to the push model, the streaming application needs to be up, with the receiver scheduled and listening on the chosen port, for Flume to be able to push data.
 
 #### Configuring Flume
 Configure Flume agent to send data to an Avro sink by having the following in the configuration file.
@@ -30,7 +32,7 @@ See the [Flume's documentation](https://flume.apache.org/documentation.html) for
 configuring Flume agents.
 
 #### Configuring Spark Streaming Application
-1. **Linking:** In your SBT/Maven projrect definition, link your streaming application against the following artifact (see [Linking section](streaming-programming-guide.html#linking) in the main programming guide for further information).
+1. **Linking:** In your SBT/Maven project definition, link your streaming application against the following artifact (see [Linking section](streaming-programming-guide.html#linking) in the main programming guide for further information).
 
 		groupId = org.apache.spark
 		artifactId = spark-streaming-flume_{{site.SCALA_BINARY_VERSION}}
@@ -44,8 +46,7 @@ configuring Flume agents.
 
 		val flumeStream = FlumeUtils.createStream(streamingContext, [chosen machine's hostname], [chosen port])
 
-	See the [API docs](api/scala/index.html#org.apache.spark.streaming.flume.FlumeUtils$)
-	and the [example]({{site.SPARK_GITHUB_URL}}/tree/master/examples/src/main/scala/org/apache/spark/examples/streaming/FlumeEventCount.scala).
+	See the [API docs](api/scala/index.html#org.apache.spark.streaming.flume.FlumeUtils$).
 	</div>
 	<div data-lang="java" markdown="1">
 		import org.apache.spark.streaming.flume.*;
@@ -53,8 +54,15 @@ configuring Flume agents.
 		JavaReceiverInputDStream<SparkFlumeEvent> flumeStream =
         	FlumeUtils.createStream(streamingContext, [chosen machine's hostname], [chosen port]);
 
-	See the [API docs](api/java/index.html?org/apache/spark/streaming/flume/FlumeUtils.html)
-	and the [example]({{site.SPARK_GITHUB_URL}}/tree/master/examples/src/main/java/org/apache/spark/examples/streaming/JavaFlumeEventCount.java).
+	See the [API docs](api/java/index.html?org/apache/spark/streaming/flume/FlumeUtils.html).
+	</div>
+	<div data-lang="python" markdown="1">
+		from pyspark.streaming.flume import FlumeUtils
+
+		flumeStream = FlumeUtils.createStream(streamingContext, [chosen machine's hostname], [chosen port])
+
+	By default, the Python API will decode Flume event body as UTF8 encoded strings. You can specify your custom decoding function to decode the body byte arrays in Flume events to any arbitrary data type. 
+	See the [API docs](api/python/pyspark.streaming.html#pyspark.streaming.flume.FlumeUtils).
 	</div>
 	</div>
 
@@ -62,7 +70,16 @@ configuring Flume agents.
     cluster (Mesos, YARN or Spark Standalone), so that resource allocation can match the names and launch
     the receiver in the right machine.
 
-3. **Deploying:** Package `spark-streaming-flume_{{site.SCALA_BINARY_VERSION}}` and its dependencies (except `spark-core_{{site.SCALA_BINARY_VERSION}}` and `spark-streaming_{{site.SCALA_BINARY_VERSION}}` which are provided by `spark-submit`) into the application JAR. Then use `spark-submit` to launch your application (see [Deploying section](streaming-programming-guide.html#deploying-applications) in the main programming guide).
+3. **Deploying:** As with any Spark applications, `spark-submit` is used to launch your application. However, the details are slightly different for Scala/Java applications and Python applications.
+
+	For Scala and Java applications, if you are using SBT or Maven for project management, then package `spark-streaming-flume_{{site.SCALA_BINARY_VERSION}}` and its dependencies into the application JAR. Make sure `spark-core_{{site.SCALA_BINARY_VERSION}}` and `spark-streaming_{{site.SCALA_BINARY_VERSION}}` are marked as `provided` dependencies as those are already present in a Spark installation. Then use `spark-submit` to launch your application (see [Deploying section](streaming-programming-guide.html#deploying-applications) in the main programming guide).
+
+	For Python applications which lack SBT/Maven project management, `spark-streaming-flume_{{site.SCALA_BINARY_VERSION}}` and its dependencies can be directly added to `spark-submit` using `--packages` (see [Application Submission Guide](submitting-applications.html)). That is,
+
+	    ./bin/spark-submit --packages org.apache.spark:spark-streaming-flume_{{site.SCALA_BINARY_VERSION}}:{{site.SPARK_VERSION_SHORT}} ...
+
+	Alternatively, you can also download the JAR of the Maven artifact `spark-streaming-flume-assembly` from the
+	[Maven repository](http://search.maven.org/#search|ga|1|a%3A%22spark-streaming-flume-assembly_{{site.SCALA_BINARY_VERSION}}%22%20AND%20v%3A%22{{site.SPARK_VERSION_SHORT}}%22) and add it to `spark-submit` with `--jars`.
 
 ## Approach 2: Pull-based Approach using a Custom Sink
 Instead of Flume pushing data directly to Spark Streaming, this approach runs a custom Flume sink that allows the following.
@@ -83,7 +100,7 @@ Choose a machine that will run the custom sink in a Flume agent. The rest of the
 #### Configuring Flume
 Configuring Flume on the chosen machine requires the following two steps.
 
-1. **Sink JARs**: Add the following JARs to Flume's classpath (see [Flume's documentation](https://flume.apache.org/documentation.html) to see how) in the machine designated to run the custom sink .
+1. **Sink JARs**: Add the following JARs to Flume's classpath (see [Flume's documentation](https://flume.apache.org/documentation.html) to see how) in the machine designated to run the custom sink.
 
 	(i) *Custom sink JAR*: Download the JAR corresponding to the following artifact (or [direct link](http://search.maven.org/remotecontent?filepath=org/apache/spark/spark-streaming-flume-sink_{{site.SCALA_BINARY_VERSION}}/{{site.SPARK_VERSION_SHORT}}/spark-streaming-flume-sink_{{site.SCALA_BINARY_VERSION}}-{{site.SPARK_VERSION_SHORT}}.jar)).
 
@@ -97,6 +114,12 @@ Configuring Flume on the chosen machine requires the following two steps.
 		artifactId = scala-library
 		version = {{site.SCALA_VERSION}}
 
+	(iii) *Commons Lang 3 JAR*: Download the Commons Lang 3 JAR. It can be found with the following artifact detail (or, [direct link](http://search.maven.org/remotecontent?filepath=org/apache/commons/commons-lang3/3.5/commons-lang3-3.5.jar)).
+
+		groupId = org.apache.commons
+		artifactId = commons-lang3
+		version = 3.5
+
 2. **Configuration file**: On that machine, configure Flume agent to send data to an Avro sink by having the following in the configuration file.
 
 		agent.sinks = spark
@@ -105,7 +128,7 @@ Configuring Flume on the chosen machine requires the following two steps.
 		agent.sinks.spark.port = <port to listen on for connection from Spark>
 		agent.sinks.spark.channel = memoryChannel
 
-	Also make sure that the upstream Flume pipeline is configured to send the data to the Flume agent running this sink.
+	Also, make sure that the upstream Flume pipeline is configured to send the data to the Flume agent running this sink.
 
 See the [Flume's documentation](https://flume.apache.org/documentation.html) for more information about
 configuring Flume agents.
@@ -127,13 +150,20 @@ configuring Flume agents.
 		JavaReceiverInputDStream<SparkFlumeEvent>flumeStream =
 			FlumeUtils.createPollingStream(streamingContext, [sink machine hostname], [sink port]);
 	</div>
-	</div>
+	<div data-lang="python" markdown="1">
+		from pyspark.streaming.flume import FlumeUtils
 
-	See the Scala example [FlumePollingEventCount]({{site.SPARK_GITHUB_URL}}/tree/master/examples/src/main/scala/org/apache/spark/examples/streaming/FlumePollingEventCount.scala).
+		addresses = [([sink machine hostname 1], [sink port 1]), ([sink machine hostname 2], [sink port 2])]
+		flumeStream = FlumeUtils.createPollingStream(streamingContext, addresses)
+
+	By default, the Python API will decode Flume event body as UTF8 encoded strings. You can specify your custom decoding function to decode the body byte arrays in Flume events to any arbitrary data type.
+	See the [API docs](api/python/pyspark.streaming.html#pyspark.streaming.flume.FlumeUtils).
+	</div>
+	</div>
 
 	Note that each input DStream can be configured to receive data from multiple sinks.
 
-3. **Deploying:** Package `spark-streaming-flume_{{site.SCALA_BINARY_VERSION}}` and its dependencies (except `spark-core_{{site.SCALA_BINARY_VERSION}}` and `spark-streaming_{{site.SCALA_BINARY_VERSION}}` which are provided by `spark-submit`) into the application JAR. Then use `spark-submit` to launch your application (see [Deploying section](streaming-programming-guide.html#deploying-applications) in the main programming guide).
+3. **Deploying:** This is same as the first approach.
 
 
 
